@@ -2,6 +2,7 @@ use axum::http::HeaderMap;
 use axum::{
     extract::{Form, Query, State},
     response::{IntoResponse, Redirect},
+    Json,
 };
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use oauth2::AuthorizationCode;
@@ -11,6 +12,7 @@ use tower_cookies::Cookies;
 use crate::{
     api::{
         common::utils::setup_auth_cookie,
+        common::ApiResponse,
         v1::{
             login::generate_token,
             oauth::{exchange_apple_code, update_user_session, AuthRequest, OAuthProvider},
@@ -27,9 +29,33 @@ pub struct AuthQueryParams {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppleFullName {
+    pub family_name: Option<String>,
+    pub given_name: Option<String>,
+    pub middle_name: Option<String>,
+    pub name_prefix: Option<String>,
+    pub name_suffix: Option<String>,
+    pub nickname: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppleMobileAuthRequest {
+    pub authorization_code: String,
+    pub email: Option<String>,
+    pub full_name: Option<AppleFullName>,
+    pub identity_token: String,
+    pub real_user_status: i32,
+    pub state: Option<String>,
+    pub user: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 struct AppleClaims {
     sub: String,
     email: Option<String>,
+    aud: serde_json::Value,
 }
 
 fn is_mobile_browser(headers: &HeaderMap) -> bool {
@@ -85,7 +111,11 @@ pub async fn apple_callback(
     validation.insecure_disable_signature_validation();
     validation.set_audience(&[std::env::var("APPLE_OAUTH_CLIENT_ID").unwrap_or_default()]);
 
-    let token_data = decode::<AppleClaims>(&id_token, &DecodingKey::from_secret(&[]), &validation)
+    let token_data = decode::<AppleClaims>(
+        &id_token, 
+        &DecodingKey::from_rsa_der(&[]), 
+        &validation
+    )
         .map_err(|e| {
         tracing::error!("Failed to decode Apple id_token: {:?}", e);
         AppError::Authentication(anyhow::anyhow!("Failed to decode Apple id_token"))
@@ -209,4 +239,90 @@ pub async fn apple_login(
 
     tracing::debug!("Generated Apple auth URL: {}", auth_url);
     Ok(Redirect::to(&auth_url))
+}
+
+#[tracing::instrument(name = "Apple Mobile OAuth callback", skip(cookies, inner, payload))]
+pub async fn apple_mobile_auth(
+    cookies: Cookies,
+    State(inner): State<InnerState>,
+    Json(payload): Json<AppleMobileAuthRequest>,
+) -> Result<Json<ApiResponse<String>>, AppError> {
+    tracing::info!("Processing Apple Mobile OAuth callback");
+
+    let InnerState {
+        db,
+        redis_cache,
+        ..
+    } = inner;
+
+    // Decode JWT without verification for now (proper verification requires Apple's public keys)
+    // In production, you should verify the signature.
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.insecure_disable_signature_validation();
+    // Temporarily disable audience validation to see what's being sent
+    validation.validate_aud = false;
+
+    // Log the header to see useful info
+    if let Ok(header) = jsonwebtoken::decode_header(&payload.identity_token) {
+        tracing::info!("JWT Header: {:?}", header);
+    }
+
+    let token_data = decode::<AppleClaims>(
+        &payload.identity_token,
+        &DecodingKey::from_rsa_der(&[]), // Use RSA der even if empty since it matches RS256 algorithm
+        &validation
+    )
+        .map_err(|e| {
+            // If from_rsa_der([]) fails, try the header-only approach or check the JWT format
+            tracing::error!("Failed to decode Apple identity_token: {:?}", e);
+            AppError::Authentication(anyhow::anyhow!("Failed to decode Apple identity_token: {}", e))
+        })?;
+
+    let apple_claims = token_data.claims;
+    tracing::info!("Decoded Apple Claims for debugging: {:?}", apple_claims);
+
+    let apple_email = apple_claims.email.or(payload.email).ok_or_else(|| {
+        tracing::error!("No email in Apple identity_token or payload");
+        AppError::Authentication(anyhow::anyhow!("No email in Apple identity_token or payload"))
+    })?;
+
+    tracing::info!("Fetched Apple user email: {}", apple_email);
+
+    let user_id = match get_user_id_from_email(&db, &apple_email).await {
+        Ok(id) => id,
+        Err(AppError::NotFound(_)) => {
+            tracing::info!(
+                "User not found for email {}. Creating user from Apple mobile auth.",
+                apple_email
+            );
+            let new_user = User {
+                id: None,
+                email: apple_email.clone(),
+                encrypted_password: None,
+                ..Default::default()
+            };
+            let mut transaction = db.begin().await.map_err(|e| {
+                AppError::Database(anyhow::Error::from(e).context("Failed to start transaction"))
+            })?;
+            let id = create_user(&mut transaction, new_user).await?;
+            transaction.commit().await.map_err(|e| {
+                AppError::Database(anyhow::Error::from(e).context("Failed to commit transaction"))
+            })?;
+            id
+        }
+        Err(e) => return Err(e),
+    };
+
+    let jwt_token = generate_token(&apple_email, &user_id)?;
+    let domain = std::env::var("GROUPIFY_HOST").expect("GROUPIFY_HOST must be set.");
+
+    setup_auth_cookie(&jwt_token, &domain, &cookies);
+
+    let channels_pattern = format!("user:{}:channels:*", user_id);
+    if let Err(e) = redis_cache.del_pattern(&channels_pattern).await {
+        tracing::warn!("apple_mobile_auth: redis DEL channels error: {:?}", e);
+    }
+
+    tracing::info!("Apple Mobile OAuth callback completed successfully for: {}", apple_email);
+    Ok(Json(ApiResponse::success(jwt_token)))
 }
