@@ -1,5 +1,3 @@
-use std::task::Poll;
-
 use crate::api::common::limits::enforce_channel_addition_limit;
 use crate::api::common::utils::timeout_query;
 use crate::api::common::ApiResponse;

@@ -8,7 +8,6 @@ use axum::response::{Response};
 use axum::Json;
 use base64::engine::general_purpose;
 use base64::Engine;
-use rand::Rng;
 
 use sqlx::{FromRow};
 use url::Url;

@@ -1,6 +1,6 @@
 use crate::api::v1::oauth::Session;
 use crate::authentication::compute_password_hash;
-use crate::authentication::password::{validate_credentials, Credentials};
+use crate::authentication::password::{Credentials};
 use crate::api::v1::login::Claims;
 use crate::errors::AppError; // Added
 use crate::InnerState;

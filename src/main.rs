@@ -51,7 +51,7 @@ struct AppState {
     inner: InnerState,
 }
 
-use crate::api::v1::oauth::{build_google_oauth_client, build_discord_oauth_client, OAuthClients};
+use crate::api::v1::oauth::{build_google_oauth_client, build_discord_oauth_client, build_apple_oauth_client, OAuthClients};
 
 #[derive(Clone, Debug)]
 struct InnerState {
@@ -127,6 +127,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         std::env::var("DISCORD_OAUTH_CLIENT_ID")?,
         std::env::var("DISCORD_OAUTH_CLIENT")?,
     );
+    let apple_oauth_client = build_apple_oauth_client(
+        std::env::var("APPLE_OAUTH_CLIENT_ID")?,
+        std::env::var("APPLE_TEAM_ID")?,
+        std::env::var("APPLE_KEY_ID")?,
+        std::env::var("APPLE_PRIVATE_KEY")?,
+    );
 
     let app_state = InnerState {
         db,
@@ -135,6 +141,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         oauth_clients: OAuthClients {
             google: google_oauth_client,
             discord: discord_oauth_client,
+            apple: apple_oauth_client,
         },
         redis_cache,
     };

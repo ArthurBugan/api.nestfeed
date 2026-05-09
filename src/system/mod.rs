@@ -9,7 +9,9 @@ use axum::{
 };
 
 
-use crate::api::{v1::auth::{google_callback, google_login}, v3::sales::make_ml_sale};
+use crate::api::v1::auth::{google_callback, google_login};
+use crate::api::v1::apple_auth::{apple_callback, apple_login};
+use crate::api::v3::sales::make_ml_sale;
 use crate::api::v1::discord_auth::{discord_callback, discord_login};
 use crate::api::v3::payments::handle_dodo_subscription_webhook;
 
@@ -48,6 +50,9 @@ pub fn create_system_router(state: InnerState) -> Router<InnerState> {
 
         .route("/auth/discord", get(discord_login))
         .route("/auth/discord_callback", get(discord_callback))
+
+        .route("/auth/apple", get(apple_login))
+        .route("/auth/apple_callback", post(apple_callback))
 
         .route("/sale", post(make_sale))
         .route("/ml-sale", post(make_ml_sale))
