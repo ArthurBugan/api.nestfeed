@@ -4,6 +4,7 @@
 //! backward compatibility with existing clients.
 
 pub mod auth;
+pub mod apple_auth;
 pub mod discord_auth;
 pub mod oauth;
 pub mod channel;

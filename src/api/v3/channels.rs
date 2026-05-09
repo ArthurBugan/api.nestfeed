@@ -3,7 +3,7 @@ use axum::{
     extract::{Path, State},
     Json,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use tower_cookies::Cookies;
 
 use sea_orm::{
@@ -17,7 +17,7 @@ use crate::{
     api::{
         common::ApiResponse,
         v1::user::get_user_id_from_token,
-        v2::channels::{ChannelWithGroup, PatchChannelRequest, PatchChannelsBatchRequest},
+        v2::channels::{ChannelWithGroup, PatchChannelsBatchRequest},
         v3::entities::{channels, group_members, groups},
     },
     errors::AppError,

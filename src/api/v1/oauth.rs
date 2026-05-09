@@ -1,10 +1,15 @@
 use chrono::{DateTime, Utc};
-use oauth2::{basic::BasicClient, AuthUrl, ClientId, ClientSecret, RedirectUrl, Scope, TokenUrl};
+use oauth2::{
+    basic::BasicClient, AuthUrl, ClientId, ClientSecret, RedirectUrl, Scope, TokenResponse,
+    TokenUrl,
+};
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::FromRow;
 use time::OffsetDateTime;
+use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+use base64::{Engine as _, engine::general_purpose};
 
 use crate::errors::AppError;
 
@@ -12,6 +17,7 @@ use crate::errors::AppError;
 pub enum OAuthProvider {
     Google,
     Discord,
+    Apple,
 }
 
 impl OAuthProvider {
@@ -19,6 +25,7 @@ impl OAuthProvider {
         match self {
             OAuthProvider::Google => "google",
             OAuthProvider::Discord => "discord",
+            OAuthProvider::Apple => "apple",
         }
     }
 }
@@ -50,6 +57,69 @@ pub struct UserProfile {
 pub struct OAuthClients {
     pub google: BasicClient,
     pub discord: BasicClient,
+    pub apple: BasicClient,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AppleTokenResponse {
+    pub access_token: String,
+    pub token_type: String,
+    pub expires_in: i64,
+    pub refresh_token: Option<String>,
+    pub id_token: Option<String>,
+}
+
+#[tracing::instrument(name = "Exchange Apple authorization code", skip(_client, code))]
+pub async fn exchange_apple_code(
+    _client: &BasicClient,
+    code: String,
+) -> Result<AppleTokenResponse, AppError> {
+    let token_url = "https://appleid.apple.com/auth/token";
+
+    let client_id = std::env::var("APPLE_OAUTH_CLIENT_ID")
+        .map_err(|_| AppError::ExternalService(anyhow::anyhow!("APPLE_OAUTH_CLIENT_ID not set")))?;
+
+    let team_id = std::env::var("APPLE_TEAM_ID")
+        .map_err(|_| AppError::ExternalService(anyhow::anyhow!("APPLE_TEAM_ID not set")))?;
+
+    let key_id = std::env::var("APPLE_KEY_ID")
+        .map_err(|_| AppError::ExternalService(anyhow::anyhow!("APPLE_KEY_ID not set")))?;
+
+    let private_key = std::env::var("APPLE_PRIVATE_KEY")
+        .map_err(|_| AppError::ExternalService(anyhow::anyhow!("APPLE_PRIVATE_KEY not set")))?;
+
+    let client_secret = generate_apple_client_secret(&team_id, &client_id, &key_id, &private_key)?;
+
+    let redirect_url = std::env::var("APPLE_REDIRECT_URL")
+        .unwrap_or_else(|_| "https://coolify.groupify.dev/api/auth/apple_callback".to_string());
+
+    let params = serde_json::json!({
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_url,
+        "client_id": client_id,
+        "client_secret": client_secret,
+    });
+
+    let http_client = Client::new();
+    let response = http_client
+        .post(token_url)
+        .header("Content-Type", "application/json")
+        .json(&params)
+        .send()
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to send Apple token request: {:?}", e);
+            AppError::ExternalService(anyhow::anyhow!("Failed to exchange authorization code"))
+        })?;
+
+    let token_response: AppleTokenResponse = response.json().await.map_err(|e| {
+        tracing::error!("Failed to parse Apple token response: {:?}", e);
+        AppError::ExternalService(anyhow::anyhow!("Invalid token response"))
+    })?;
+
+    tracing::debug!("Successfully exchanged Apple authorization code");
+    Ok(token_response)
 }
 
 #[tracing::instrument(name = "Build Google OAuth client", skip(client_id, client_secret))]
@@ -96,6 +166,85 @@ pub fn build_discord_oauth_client(client_id: String, client_secret: String) -> B
     .set_redirect_uri(RedirectUrl::new(redirect_url).unwrap())
 }
 
+#[derive(Debug, Serialize)]
+struct AppleClientSecretClaims {
+    iss: String,
+    iat: i64,
+    exp: i64,
+    aud: String,
+    sub: String,
+}
+
+#[tracing::instrument(name = "Generate Apple client secret", skip(private_key_base64))]
+pub fn generate_apple_client_secret(
+    team_id: &str,
+    client_id: &str,
+    key_id: &str,
+    private_key_base64: &str,
+) -> Result<String, AppError> {
+    let iat = Utc::now().timestamp();
+    let exp = iat + (180 * 24 * 60 * 60); // 180 days (max allowed by Apple)
+
+    let claims = AppleClientSecretClaims {
+        iss: team_id.to_string(),
+        iat,
+        exp,
+        aud: "https://appleid.apple.com".to_string(),
+        sub: client_id.to_string(),
+    };
+
+    let mut header = Header::new(Algorithm::ES256);
+    header.kid = Some(key_id.to_string());
+
+    // Decode base64 private key
+    let private_key_bytes = general_purpose::STANDARD
+        .decode(private_key_base64)
+        .map_err(|e| {
+            tracing::error!("Failed to decode Apple private key from base64: {:?}", e);
+            AppError::ExternalService(anyhow::anyhow!("Invalid base64 Apple private key: {}", e))
+        })?;
+
+    let key = EncodingKey::from_ec_pem(&private_key_bytes).map_err(|e| {
+        tracing::error!("Failed to create encoding key from Apple private key: {:?}", e);
+        AppError::ExternalService(anyhow::anyhow!("Invalid Apple private key PEM: {}", e))
+    })?;
+
+    encode(&header, &claims, &key).map_err(|e| {
+        tracing::error!("Failed to encode Apple client secret JWT: {:?}", e);
+        AppError::ExternalService(anyhow::anyhow!("Failed to generate Apple client secret: {}", e))
+    })
+}
+
+#[tracing::instrument(name = "Build Apple OAuth client", skip(client_id, team_id, key_id, private_key))]
+pub fn build_apple_oauth_client(
+    client_id: String,
+    team_id: String,
+    key_id: String,
+    private_key: String,
+) -> BasicClient {
+    tracing::info!("Building Apple OAuth client");
+
+    let client_secret = generate_apple_client_secret(&team_id, &client_id, &key_id, &private_key)
+        .expect("Failed to generate Apple client secret");
+
+    let redirect_url = std::env::var("APPLE_REDIRECT_URL")
+        .unwrap_or_else(|_| "https://coolify.groupify.dev/api/auth/apple_callback".to_string());
+
+    tracing::debug!("Using Apple redirect URL: {}", redirect_url);
+
+    BasicClient::new(
+        ClientId::new(client_id),
+        Some(ClientSecret::new(client_secret)),
+        AuthUrl::new("https://appleid.apple.com/auth/authorize".to_string())
+            .expect("Invalid Apple authorization endpoint URL"),
+        Some(
+            TokenUrl::new("https://appleid.apple.com/auth/token".to_string())
+                .expect("Invalid Apple token endpoint URL"),
+        ),
+    )
+    .set_redirect_uri(RedirectUrl::new(redirect_url).unwrap())
+}
+
 #[tracing::instrument(name = "Generate OAuth authorization URL")]
 pub fn generate_auth_url(
     client: &BasicClient,
@@ -127,6 +276,12 @@ pub fn generate_auth_url(
                 .add_scope(Scope::new("identify".to_string()))
                 .add_scope(Scope::new("email".to_string()));
         }
+        OAuthProvider::Apple => {
+            auth_request = auth_request
+                .add_scope(Scope::new("name".to_string()))
+                .add_scope(Scope::new("email".to_string()))
+                .add_extra_param("response_mode", "form_post");
+        }
     }
 
     let (auth_url, _csrf_token) = auth_request.url();
@@ -138,6 +293,11 @@ pub async fn fetch_user_profile(
     access_token: &str,
     provider: &OAuthProvider,
 ) -> Result<UserProfile, AppError> {
+    if let OAuthProvider::Apple = provider {
+        // Apple profile is typically in the id_token, not a separate endpoint.
+        // For now, we'll return a placeholder or handle it in the callback.
+        return Err(AppError::ExternalService(anyhow::anyhow!("Apple profile must be extracted from id_token")));
+    }
     let client = Client::new();
 
     let (url, auth_header) = match provider {
@@ -147,6 +307,10 @@ pub async fn fetch_user_profile(
         ),
         OAuthProvider::Discord => (
             "https://discord.com/api/users/@me",
+            format!("Bearer {}", access_token),
+        ),
+        OAuthProvider::Apple => (
+            "https://appleid.apple.com/auth/userinfo",
             format!("Bearer {}", access_token),
         ),
     };
@@ -202,6 +366,16 @@ pub async fn fetch_user_profile(
                     user_id, avatar_hash
                 )
             }),
+        },
+        OAuthProvider::Apple => UserProfile {
+            email: user_data["email"]
+                .as_str()
+                .ok_or_else(|| {
+                    AppError::ExternalService(anyhow::anyhow!("No email in Apple profile"))
+                })?
+                .to_string(),
+            display_name: None, // Apple UserInfo doesn't usually provide name
+            avatar_url: None,
         },
     };
 
