@@ -8,7 +8,9 @@ use sqlx::{Executor, Postgres, Transaction};
 use tower_cookies::Cookies;
 use std::collections::HashMap;
 
+use crate::api::common::ApiResponse;
 use crate::api::common::utils::setup_auth_cookie;
+use crate::api::v1::login::generate_token;
 use crate::api::v1::user::{create_user, User};
 use crate::InnerState;
 use crate::errors::AppError; // Added
@@ -20,7 +22,7 @@ pub async fn subscribe(
     State(inner): State<InnerState>,
     cookies: Cookies,
     Json(user): Json<User>,
-) -> Result<Json<Value>, AppError> {
+) -> Result<Json<ApiResponse<String>>,  AppError> {
     tracing::info!("Starting subscription process for user: {}", user.email);
     let InnerState {
         email_client, db, ..
@@ -53,8 +55,9 @@ pub async fn subscribe(
         AppError::Unexpected(anyhow::anyhow!(e).context("GROUPIFY_HOST env var not set"))
     })?;
 
-    setup_auth_cookie(&subscription_token, &domain, &cookies);
-    Ok(Json(json!({ "message": "Subscription process completed successfully" })))
+    let access_token = generate_token(&user.email, &user_id)?;
+    setup_auth_cookie(&access_token, &domain, &cookies);    
+    Ok(Json(ApiResponse::success("Subscription process completed successfully".to_owned())))
 }
 
 #[tracing::instrument(name = "Generate subscription token")]
