@@ -171,13 +171,12 @@ pub async fn all_groups_v3(
         }
     }
 
-    let rows: Vec<GroupWithCountRow> = data_q
+let rows: Vec<GroupWithCountRow> = data_q
         .into_model::<GroupWithCountRow>()
         .all(&sea_db)
         .await
         .map_err(AppError::SeaORM)?;
 
-    // Map directly to Group without needing a second query or HashMap
     let out: Vec<Group> = rows
         .into_iter()
         .map(|row| Group {
@@ -794,23 +793,63 @@ pub async fn get_groupshelf_groups(
         .await
         .map_err(AppError::SeaORM)?;
 
+    let group_ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
+
+    let channels: Vec<ChannelWithGroup> = if !group_ids.is_empty() {
+        channels::Entity::find()
+            .filter(channels::Column::GroupId.is_in(group_ids.clone()))
+            .join(JoinType::LeftJoin, channels::Relation::Groups.def())
+            .select_only()
+            .column_as(channels::Column::Id, "id")
+            .column_as(channels::Column::UserId, "user_id")
+            .column_as(channels::Column::GroupId, "group_id")
+            .column_as(channels::Column::Name, "name")
+            .column_as(channels::Column::ChannelId, "channel_id")
+            .column_as(channels::Column::Thumbnail, "thumbnail")
+            .column_as(channels::Column::CreatedAt, "created_at")
+            .column_as(channels::Column::UpdatedAt, "updated_at")
+            .column_as(channels::Column::ContentType, "content_type")
+            .column_as(channels::Column::Url, "url")
+            .column_as(groups::Column::Name, "group_name")
+            .column_as(groups::Column::Icon, "group_icon")
+            .into_model::<ChannelWithGroup>()
+            .all(&sea_db)
+            .await
+            .map_err(AppError::SeaORM)?
+    } else {
+        Vec::new()
+    };
+
+    let channels_by_group: std::collections::HashMap<String, Vec<ChannelWithGroup>> = channels
+        .into_iter()
+        .fold(std::collections::HashMap::new(), |mut acc, ch| {
+            if let Some(gid) = &ch.group_id {
+                acc.entry(gid.clone()).or_default().push(ch);
+            }
+            acc
+        });
+
     let out: Vec<Group> = rows
         .into_iter()
-        .map(|row| Group {
-            id: Some(row.id),
-            created_at: row.created_at,
-            updated_at: row.updated_at,
-            name: row.name,
-            icon: row.icon,
-            user_id: row.user_id,
-            description: row.description,
-            category: row.category,
-            parent_id: row.parent_id,
-            nesting_level: row.nesting_level,
-            display_order: row.display_order,
-            enable_groupshelf: row.enable_groupshelf,
-            channel_count: None,
-            channels: Vec::new(),
+        .map(|row| {
+            let row_id = row.id.clone();
+            let channel_count = channels_by_group.get(&row_id).map(|c| c.len() as i64).unwrap_or(0);
+            Group {
+                id: Some(row.id),
+                created_at: row.created_at,
+                updated_at: row.updated_at,
+                name: row.name,
+                icon: row.icon,
+                user_id: row.user_id,
+                description: row.description,
+                category: row.category,
+                parent_id: row.parent_id,
+                nesting_level: row.nesting_level,
+                display_order: row.display_order,
+                enable_groupshelf: row.enable_groupshelf,
+                channel_count: Some(channel_count),
+                channels: channels_by_group.get(&row_id).cloned().unwrap_or_default(),
+            }
         })
         .collect();
 
