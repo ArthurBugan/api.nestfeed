@@ -160,7 +160,7 @@ pub async fn send_forget_password_email(
 
     let confirmation_link = format!(
         "{}/forget-password/confirm/{}",
-        &String::from("https://groupify.dev"),
+        &String::from("https://nestfeed.app"),
         forget_password_token
     );
     tracing::debug!("Generated confirmation link: {}", confirmation_link);
@@ -172,10 +172,10 @@ pub async fn send_forget_password_email(
     let mut template_model = HashMap::new();
     template_model.insert("product_name".to_owned(), "Groupify".to_owned());
     template_model.insert("action_url".to_owned(), confirmation_link);
-    template_model.insert("support_email".to_owned(), "admin@groupify.dev".to_owned());
+    template_model.insert("support_email".to_owned(), "admin@nestfeed.app".to_owned());
     template_model.insert(
         "login_url".to_owned(),
-        "https://groupify.dev/login".to_owned(),
+        "https://nestfeed.app/login".to_owned(),
     );
 
     tracing::debug!("Sending email via email client");

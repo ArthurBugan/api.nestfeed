@@ -91,7 +91,7 @@ pub async fn exchange_apple_code(
     let client_secret = generate_apple_client_secret(&team_id, &client_id, &key_id, &private_key)?;
 
     let redirect_url = std::env::var("APPLE_REDIRECT_URL")
-        .unwrap_or_else(|_| "https://coolify.groupify.dev/api/auth/apple_callback".to_string());
+        .unwrap_or_else(|_| "https://coolify.nestfeed.app/api/auth/apple_callback".to_string());
 
     let params = serde_json::json!({
         "grant_type": "authorization_code",
@@ -127,7 +127,7 @@ pub fn build_google_oauth_client(client_id: String, client_secret: String) -> Ba
     tracing::info!("Building Google OAuth client");
 
     let redirect_url = std::env::var("GOOGLE_REDIRECT_URL")
-        .unwrap_or_else(|_| "https://coolify.groupify.dev/api/auth/google_callback".to_string());
+        .unwrap_or_else(|_| "https://coolify.nestfeed.app/api/auth/google_callback".to_string());
 
     tracing::debug!("Using Google redirect URL: {}", redirect_url);
 
@@ -149,7 +149,7 @@ pub fn build_discord_oauth_client(client_id: String, client_secret: String) -> B
     tracing::info!("Building Discord OAuth client");
 
     let redirect_url = std::env::var("DISCORD_REDIRECT_URL")
-        .unwrap_or_else(|_| "https://coolify.groupify.dev/api/auth/discord_callback".to_string());
+        .unwrap_or_else(|_| "https://coolify.nestfeed.app/api/auth/discord_callback".to_string());
 
     tracing::debug!("Using Discord redirect URL: {}", redirect_url);
 
@@ -228,7 +228,7 @@ pub fn build_apple_oauth_client(
         .expect("Failed to generate Apple client secret");
 
     let redirect_url = std::env::var("APPLE_REDIRECT_URL")
-        .unwrap_or_else(|_| "https://coolify.groupify.dev/api/auth/apple_callback".to_string());
+        .unwrap_or_else(|_| "https://coolify.nestfeed.app/api/auth/apple_callback".to_string());
 
     tracing::debug!("Using Apple redirect URL: {}", redirect_url);
 

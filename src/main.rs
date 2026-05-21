@@ -153,8 +153,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "http://localhost".parse().unwrap(),
         "http://localhost:3000".parse().unwrap(),
         "https://localhost:3000".parse().unwrap(),
-        "https://groupify.dev".parse().unwrap(),
-        "https://coolify.groupify.dev".parse().unwrap(),
+        "https://nestfeed.app".parse().unwrap(),
+        "https://coolify.nestfeed.app".parse().unwrap(),
         "https://www.youtube.com".parse().unwrap(),
         "https://youtube.com".parse().unwrap(),
     ];
