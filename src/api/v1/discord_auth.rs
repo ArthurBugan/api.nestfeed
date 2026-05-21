@@ -143,7 +143,7 @@ pub async fn discord_callback(
 
     // Redirect to your frontend with success
     let frontend_url =
-        std::env::var("GROUPIFY_HOST").unwrap_or_else(|_| "https://groupify.dev".to_string());
+        std::env::var("GROUPIFY_HOST").unwrap_or_else(|_| "https://nestfeed.app".to_string());
 
     tracing::debug!("Generating JWT token for user: {} and original_email: {}", email, original_email);
 
