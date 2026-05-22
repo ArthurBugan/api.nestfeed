@@ -185,7 +185,6 @@ pub struct AnimeDetailResponse {
     pub group_icon: Option<String>,
     pub average_rating: Option<f64>,
     pub launch_year: Option<i32>,
-    pub user_owned: bool,
 }
 
 #[tracing::instrument(name = "Get anime by ID", skip(cookies, inner))]
@@ -252,7 +251,6 @@ pub async fn get_anime_v3(
             group_icon: anime.group_icon.clone(),
             average_rating: anime.average_rating.clone(),
             launch_year: anime.launch_year.clone(),
-            user_owned: true,
         };
 
         let _ = redis_cache.set_json(&cache_key, &response, 300).await;
@@ -288,7 +286,6 @@ pub async fn get_anime_v3(
             group_icon: anime.group_icon.clone(),
             average_rating: anime.average_rating.clone(),
             launch_year: anime.launch_year.clone(),
-            user_owned: false,
         };
 
         let _ = redis_cache.set_json(&cache_key, &response, 300).await;
