@@ -25,7 +25,8 @@ pub struct DodoCustomer {
     pub customer_id: String,
     pub email: String,
     pub name: String,
-    pub metadata: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub metadata: Option<HashMap<String, serde_json::Value>>,
     #[serde(default)]
     pub phone_number: Option<String>,
 }
@@ -35,12 +36,14 @@ pub struct DodoSubscriptionData {
     pub subscription_id: String,
     pub status: String,
     pub created_at: String,
-    pub expires_at: String,
+    #[serde(default)]
+    pub expires_at: Option<String>,
     pub next_billing_date: String,
     pub product_id: String,
     pub quantity: i32,
     pub customer: DodoCustomer,
-    pub metadata: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub metadata: Option<HashMap<String, serde_json::Value>>,
     #[serde(default)]
     pub custom_field_responses: Option<HashMap<String, serde_json::Value>>,
 }
@@ -49,7 +52,8 @@ pub struct DodoSubscriptionData {
 pub struct DodoWebhookPayload {
     #[serde(rename = "type")]
     pub event_type: String,
-    pub business_id: String,
+    #[serde(default)]
+    pub business_id: Option<String>,
     pub data: DodoSubscriptionData,
     pub timestamp: String,
 }
@@ -152,7 +156,8 @@ async fn activate_subscription_from_dodo_webhook(
     payload: &DodoWebhookPayload,
 ) -> Result<(), AppError> {
     // Extract user_id from metadata
-    let user_id = payload.data.metadata.get("user_id")
+    let user_id = payload.data.metadata.as_ref()
+        .and_then(|m| m.get("user_id"))
         .and_then(|v| v.as_str())
         .ok_or_else(|| {
             error!("User ID not found in Dodo webhook metadata: {:?}", payload.data.metadata);
@@ -160,7 +165,8 @@ async fn activate_subscription_from_dodo_webhook(
         })?;
     
     // Extract plan_name from metadata and map to database plan names
-    let dodo_plan_name = payload.data.metadata.get("plan_name")
+    let dodo_plan_name = payload.data.metadata.as_ref()
+        .and_then(|m| m.get("plan_name"))
         .and_then(|v| v.as_str())
         .ok_or_else(|| {
             error!("Plan name not found in Dodo webhook metadata: {:?}", payload.data.metadata);
@@ -274,22 +280,105 @@ async fn activate_subscription_from_dodo_webhook(
 }
 
 /// Handle Dodo webhook for subscription activation
-#[tracing::instrument(name = "Handle Dodo subscription webhook", skip(inner, payload))]
+#[tracing::instrument(name = "Handle Dodo subscription webhook", skip(inner))]
 pub async fn handle_dodo_subscription_webhook(
     State(inner): State<InnerState>,
-    Json(payload): Json<DodoWebhookPayload>,
+    Json(payload): Json<serde_json::Value>,
 ) -> Result<Json<ApiResponse<String>>, AppError> {
-    info!("Received Dodo webhook: {:?}", payload);
-    
-    // Only process subscription.active events
-    if payload.event_type != "subscription.active" {
-        info!("Ignoring Dodo event type: {}", payload.event_type);
-        return Ok(Json(ApiResponse::success("Event ignored".to_string())));
+    let event_type = payload.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    info!("Received Dodo webhook event: {}", event_type);
+
+    match event_type.as_str() {
+        "subscription.active" | "subscription.renewed" => {
+            let dodo_payload: DodoWebhookPayload = serde_json::from_value(payload)
+                .map_err(|e| {
+                    error!("Failed to deserialize {} payload: {}", event_type, e);
+                    AppError::BadRequest("Invalid webhook payload".to_string())
+                })?;
+            activate_subscription_from_dodo_webhook(&inner, &dodo_payload).await?;
+            Ok(Json(ApiResponse::success("Subscription processed successfully".to_string())))
+        }
+        "payment.succeeded" => {
+            let data = payload.get("data").ok_or_else(|| {
+                AppError::BadRequest("Missing data field in payment webhook".to_string())
+            })?;
+
+            let subscription_id = data.get("subscription_id").and_then(|v| v.as_str());
+            let customer_id = data.get("customer").and_then(|c| c.get("customer_id")).and_then(|v| v.as_str());
+
+            if let Some(sub_id) = subscription_id {
+                if let Some(cus_id) = customer_id {
+                    let db = &inner.sea_db;
+
+                    if let Some(existing_sub) = subscription_plans_users::Entity::find()
+                        .filter(subscription_plans_users::Column::ExternalSubscriptionId.eq(sub_id))
+                        .one(db)
+                        .await
+                        .map_err(AppError::SeaORM)?
+                    {
+                        if existing_sub.external_customer_id.is_none() {
+                            let mut active_model: subscription_plans_users::ActiveModel = existing_sub.into();
+                            active_model.external_customer_id = Set(Some(cus_id.to_string()));
+                            active_model.update(db).await.map_err(AppError::SeaORM)?;
+                            info!("Updated external_customer_id for subscription {}", sub_id);
+                        }
+                    } else {
+                        let user_id = data.get("metadata").and_then(|m| m.get("user_id")).and_then(|v| v.as_str());
+                        let plan_name = data.get("metadata").and_then(|m| m.get("plan_name")).and_then(|v| v.as_str());
+
+                        if let (Some(uid), Some(pname)) = (user_id, plan_name) {
+                            let db_plan_name = match pname {
+                                "Basic" => "Groupify Basic Monthly",
+                                "Pro" => "Groupify Pro Monthly",
+                                _ => {
+                                    error!("Unknown plan name from payment webhook: {}", pname);
+                                    return Err(AppError::BadRequest(format!("Unknown plan: {}", pname)));
+                                }
+                            };
+
+                            let user = crate::api::v3::entities::users::Entity::find()
+                                .filter(crate::api::v3::entities::users::Column::Id.eq(uid))
+                                .one(db)
+                                .await
+                                .map_err(AppError::SeaORM)?
+                                .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+
+                            let plan = crate::api::v3::entities::subscription_plans::Entity::find()
+                                .filter(crate::api::v3::entities::subscription_plans::Column::Name.eq(db_plan_name))
+                                .one(db)
+                                .await
+                                .map_err(AppError::SeaORM)?
+                                .ok_or_else(|| AppError::NotFound("Plan not found".to_string()))?;
+
+                            let created_at_str = data.get("created_at").and_then(|v| v.as_str()).unwrap_or("");
+                            let created_at = chrono::DateTime::parse_from_rfc3339(created_at_str).ok();
+
+                            let new_sub = subscription_plans_users::ActiveModel {
+                                user_id: Set(user.id.clone()),
+                                subscription_plan_id: Set(plan.id),
+                                started_at: Set(created_at.map(|dt| dt.fixed_offset())),
+                                ended_at: Set(None),
+                                created_at: Set(Some(Utc::now().fixed_offset())),
+                                updated_at: Set(Some(Utc::now().fixed_offset())),
+                                external_subscription_id: Set(Some(sub_id.to_string())),
+                                external_customer_id: Set(Some(cus_id.to_string())),
+                                ..Default::default()
+                            };
+
+                            new_sub.insert(db).await.map_err(AppError::SeaORM)?;
+                            info!("Created subscription from payment.succeeded webhook for user {}", uid);
+                        }
+                    }
+                }
+            }
+
+            Ok(Json(ApiResponse::success("Payment processed".to_string())))
+        }
+        _ => {
+            info!("Ignoring Dodo event type: {}", event_type);
+            Ok(Json(ApiResponse::success("Event ignored".to_string())))
+        }
     }
-    
-    activate_subscription_from_dodo_webhook(&inner, &payload).await?;
-    
-    Ok(Json(ApiResponse::success("Subscription activated successfully".to_string())))
 }
 
 /// Cancel the user's subscription
