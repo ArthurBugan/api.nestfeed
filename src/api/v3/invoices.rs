@@ -67,98 +67,99 @@ pub async fn get_invoice_history(
         .await
         .map_err(AppError::SeaORM)?;
 
-    let client = reqwest::Client::new();
-    let mut req = client
-        .get(format!("{}/payments", base_url))
-        .header("Authorization", format!("Bearer {}", dodo_api_key))
-        .header("Content-Type", "application/json")
-        .header("Dodo-Environment", &environment);
+    let customer_id = active_sub
+        .as_ref()
+        .and_then(|s| s.external_customer_id.clone());
 
-    if let Some(ref sub) = active_sub {
-        if let Some(ref customer_id) = sub.external_customer_id {
-            req = req.query(&[("customer_id", customer_id)]);
+    let items = if let Some(ref cus_id) = customer_id {
+        let client = reqwest::Client::new();
+        let response = client
+            .get(format!("{}/payments", base_url))
+            .header("Authorization", format!("Bearer {}", dodo_api_key))
+            .header("Content-Type", "application/json")
+            .header("Dodo-Environment", &environment)
+            .query(&[("customer_id", cus_id)])
+            .send()
+            .await
+            .map_err(|e| {
+                error!("Failed to call Dodo payments API: {}", e);
+                AppError::ExternalService(anyhow::anyhow!("Failed to fetch invoices from Dodo"))
+            })?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            error!("Dodo payments API error: {}", error_text);
+            return Err(AppError::ExternalService(anyhow::anyhow!(
+                "Dodo API error: {}",
+                error_text
+            )));
         }
-    }
 
-    let response = req
-        .send()
-        .await
-        .map_err(|e| {
-            error!("Failed to call Dodo payments API: {}", e);
-            AppError::ExternalService(anyhow::anyhow!("Failed to fetch invoices from Dodo"))
+        let dodo_response: serde_json::Value = response.json().await.map_err(|e| {
+            error!("Failed to parse Dodo payments response: {}", e);
+            AppError::BadRequest("Failed to parse Dodo response".to_string())
         })?;
 
-    if !response.status().is_success() {
-        let error_text = response.text().await.unwrap_or_default();
-        error!("Dodo payments API error: {}", error_text);
-        return Err(AppError::ExternalService(anyhow::anyhow!(
-            "Dodo API error: {}",
-            error_text
-        )));
-    }
-
-    let dodo_response: serde_json::Value = response.json().await.map_err(|e| {
-        error!("Failed to parse Dodo payments response: {}", e);
-        AppError::BadRequest("Failed to parse Dodo response".to_string())
-    })?;
-
-    let items = dodo_response
-        .get("items")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .map(|item| InvoiceItem {
-                    payment_id: item
-                        .get("payment_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    total_amount: item
-                        .get("total_amount")
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0) as i32,
-                    currency: item
-                        .get("currency")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    status: item
-                        .get("status")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                    created_at: item
-                        .get("created_at")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    customer_name: item
-                        .get("customer")
-                        .and_then(|c| c.get("name"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    customer_email: item
-                        .get("customer")
-                        .and_then(|c| c.get("email"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    subscription_id: item
-                        .get("subscription_id")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                    invoice_url: item
-                        .get("invoice_url")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                    refund_status: item
-                        .get("refund_status")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+        dodo_response
+            .get("items")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .map(|item| InvoiceItem {
+                        payment_id: item
+                            .get("payment_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        total_amount: item
+                            .get("total_amount")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0) as i32,
+                        currency: item
+                            .get("currency")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        status: item
+                            .get("status")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                        created_at: item
+                            .get("created_at")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        customer_name: item
+                            .get("customer")
+                            .and_then(|c| c.get("name"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        customer_email: item
+                            .get("customer")
+                            .and_then(|c| c.get("email"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        subscription_id: item
+                            .get("subscription_id")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                        invoice_url: item
+                            .get("invoice_url")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                        refund_status: item
+                            .get("refund_status")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
 
     Ok(Json(ApiResponse::success(InvoicesResponse { items })))
 }
