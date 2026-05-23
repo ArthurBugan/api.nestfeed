@@ -7,6 +7,7 @@ pub mod services;
 pub mod share_links;
 pub mod users;
 pub mod payments;
+pub mod invoices;
 pub mod blog;
 pub mod proxy;
 pub mod websites;
@@ -46,6 +47,7 @@ pub fn create_v3_router(state: InnerState) -> Router<InnerState> {
         .route("/api/v3/proxy/fetch-url", post(proxy::fetch_url_metadata))
         .route("/api/v3/payments", post(payments::create_checkout_session))
         .route("/api/v3/payments/cancel", post(payments::cancel_subscription))
+        .route("/api/v3/invoices/history", get(invoices::get_invoice_history))
         .layer(CookieManagerLayer::new())
         .layer(middleware::from_fn(auth_middleware))
         .with_state(state)
