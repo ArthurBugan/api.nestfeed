@@ -113,7 +113,51 @@ pub async fn create_checkout_session(
     });
 
     if is_mobile {
+        info!("Mobile client detected, setting confirm=true and adding customer details");
+
+        let user = users::Entity::find_by_id(&payload.user_id)
+            .one(&inner.sea_db)
+            .await
+            .map_err(|e| {
+                error!("Failed to look up user {}: {}", payload.user_id, e);
+                AppError::BadRequest("Failed to look up user".to_string())
+            })?
+            .ok_or_else(|| {
+                error!("User {} not found", payload.user_id);
+                AppError::BadRequest("User not found".to_string())
+            })?;
+
         request_body["confirm"] = serde_json::json!(true);
+
+        let existing_customer = subscription_plans_users::Entity::find()
+            .filter(subscription_plans_users::Column::UserId.eq(&payload.user_id))
+            .filter(subscription_plans_users::Column::ExternalCustomerId.is_not_null())
+            .one(&inner.sea_db)
+            .await
+            .map_err(|e| {
+                error!("Failed to look up existing subscription for user {}: {}", payload.user_id, e);
+                AppError::BadRequest("Failed to look up subscription".to_string())
+            })?;
+
+        if let Some(sub) = existing_customer {
+            if let Some(ref customer_id) = sub.external_customer_id {
+                info!("Using existing Dodo customer: {}", customer_id);
+                request_body["customer"] = serde_json::json!({
+                    "customer_id": customer_id,
+                    "email": user.email,
+                });
+            }
+        } else {
+          let name = user
+                .display_name
+                .as_deref()
+                .unwrap_or("User Name");
+
+            request_body["customer"] = serde_json::json!({
+                "email": user.email,
+                "name": name,
+            });
+        }
     }
 
     // Get Dodo API credentials from environment
