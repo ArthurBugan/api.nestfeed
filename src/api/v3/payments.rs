@@ -77,11 +77,14 @@ pub async fn create_checkout_session(
                 || ua_lower.contains("iphone")
                 || ua_lower.contains("ipad")
                 || ua_lower.contains("ipod")
+                || ua_lower.contains("nestfeed")
         })
         .unwrap_or(false);
 
     if is_mobile {
         info!("Mobile client detected, setting confirm=true");
+    } else {
+        info!("Desktop client detected, not setting confirm=true");
     }
     
     // Determine product ID based on plan name
@@ -125,6 +128,8 @@ pub async fn create_checkout_session(
     
     let checkout_url = std::env::var("DODO_CHECKOUT")
         .unwrap_or_else(|_| format!("{}{}", url, "/checkouts"));
+
+    debug!("Dodo checkout session request: {:?}", request_body);
 
     let response = client
         .post(format!("{}{}", url, "/checkouts"))
