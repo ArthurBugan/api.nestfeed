@@ -11,6 +11,25 @@ use crate::{InnerState, api::common::ApiResponse, errors::AppError, api::{v1::us
 pub struct CreateCheckoutSessionRequest {
     pub plan_name: String,
     pub user_id: String,
+    #[serde(default)]
+    pub customer_name: Option<String>,
+    #[serde(default)]
+    pub billing_address: Option<BillingAddress>,
+    #[serde(default)]
+    pub billing_currency: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct BillingAddress {
+    pub country: String,
+    #[serde(default)]
+    pub city: Option<String>,
+    #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default)]
+    pub street: Option<String>,
+    #[serde(default)]
+    pub zipcode: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -112,6 +131,9 @@ pub async fn create_checkout_session(
         }
     });
 
+    if let Some(currency) = &payload.billing_currency {
+        request_body["billing_currency"] = serde_json::json!(currency);
+    }
     if is_mobile {
         info!("Mobile client detected, setting confirm=true and adding customer details");
 
@@ -148,15 +170,20 @@ pub async fn create_checkout_session(
                 });
             }
         } else {
-          let name = user
-                .display_name
-                .as_deref()
-                .unwrap_or("User Name");
+            let name = payload.customer_name
+                .clone()
+                .or_else(|| user.display_name.clone())
+                .unwrap_or_else(|| "User Name".to_string());
 
             request_body["customer"] = serde_json::json!({
                 "email": user.email,
                 "name": name,
             });
+        }
+
+        if let Some(address) = &payload.billing_address {
+            request_body["billing_address"] = serde_json::json!(address);
+            request_body["minimal_address"] = serde_json::json!(true);
         }
     }
 
