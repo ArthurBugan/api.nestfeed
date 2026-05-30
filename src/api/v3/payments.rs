@@ -1,4 +1,4 @@
-use axum::{Json, extract::State};
+use axum::{Json, extract::State, http::HeaderMap};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::{debug, error, info};
@@ -17,6 +17,7 @@ pub struct CreateCheckoutSessionRequest {
 pub struct CheckoutSessionResponse {
     pub session_id: String,
     pub checkout_url: String,
+    pub client_secret: Option<String>,
 }
 
 // Dodo webhook types
@@ -59,12 +60,29 @@ pub struct DodoWebhookPayload {
 }
 
 /// Create a Dodo checkout session for subscription plans
-#[tracing::instrument(name = "Create Dodo checkout session", skip(inner))]
+#[tracing::instrument(name = "Create Dodo checkout session", skip(inner, headers))]
 pub async fn create_checkout_session(
+    headers: HeaderMap,
     State(inner): State<InnerState>,
     Json(payload): Json<CreateCheckoutSessionRequest>,
 ) -> Result<Json<ApiResponse<CheckoutSessionResponse>>, AppError> {
     info!("Creating checkout session for user: {} - plan: {}", payload.user_id, payload.plan_name);
+    
+    let is_mobile = headers.get("user-agent")
+        .and_then(|v| v.to_str().ok())
+        .map(|ua| {
+            let ua_lower = ua.to_lowercase();
+            ua_lower.contains("mobile")
+                || ua_lower.contains("android")
+                || ua_lower.contains("iphone")
+                || ua_lower.contains("ipad")
+                || ua_lower.contains("ipod")
+        })
+        .unwrap_or(false);
+
+    if is_mobile {
+        info!("Mobile client detected, setting confirm=true");
+    }
     
     // Determine product ID based on plan name
     let product_id = match payload.plan_name.as_str() {
@@ -80,7 +98,7 @@ pub async fn create_checkout_session(
     let client = reqwest::Client::new();
     
     // Prepare the request to Dodo API
-    let request_body = serde_json::json!({
+    let mut request_body = serde_json::json!({
         "product_cart": [{
             "product_id": product_id,
             "quantity": 1
@@ -90,6 +108,10 @@ pub async fn create_checkout_session(
             "plan_name": payload.plan_name
         }
     });
+
+    if is_mobile {
+        request_body["confirm"] = serde_json::json!(true);
+    }
 
     // Get Dodo API credentials from environment
     let dodo_api_key = std::env::var("DODO_API_KEY")
@@ -139,6 +161,10 @@ pub async fn create_checkout_session(
         })?
         .to_string();
 
+    let client_secret = dodo_response.get("client_secret")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
     let checkout_url = format!("{}/session/{}", checkout_url, session_id);
 
     info!("Successfully created checkout session: {} for user: {}", session_id, payload.user_id);
@@ -146,6 +172,7 @@ pub async fn create_checkout_session(
     Ok(Json(ApiResponse::success(CheckoutSessionResponse {
         session_id,
         checkout_url,
+        client_secret,
     })))
 }
 
