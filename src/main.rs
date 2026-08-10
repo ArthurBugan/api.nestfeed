@@ -37,7 +37,6 @@ use std::sync::{Arc, RwLock};
 use tower_http::trace::TraceLayer;
 use tracing::Level;
 
-use axum_otel::{AxumOtelOnFailure, AxumOtelOnResponse, AxumOtelSpanCreator};
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tracing_otel_extra::{
     get_resource, init_env_filter, init_logger_provider, init_meter_provider, init_tracer_provider, init_tracing_subscriber
@@ -194,17 +193,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         .on_request(on_custom_request)
                         .on_response(on_custom_response)
                         .on_failure(on_custom_failure),
-                )
-                .layer(PropagateRequestIdLayer::x_request_id()),
-        )
-        .layer(
-            ServiceBuilder::new()
-                .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
-                .layer(
-                    TraceLayer::new_for_http()
-                        .make_span_with(AxumOtelSpanCreator::new().level(Level::DEBUG))
-                        .on_response(AxumOtelOnResponse::new().level(Level::DEBUG))
-                        .on_failure(AxumOtelOnFailure::new().level(Level::ERROR)),
                 )
                 .layer(PropagateRequestIdLayer::x_request_id()),
         )

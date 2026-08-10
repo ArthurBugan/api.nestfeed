@@ -134,7 +134,7 @@ pub async fn create_user(
 
     // Assign the new user to subscription_plan_id 1
     let default_plan_id = 1;
-    let now = time::OffsetDateTime::now_utc();
+    let now = chrono::Utc::now();
     sqlx::query!(
         r#"INSERT INTO subscription_plans_users (user_id, subscription_plan_id, started_at, created_at, updated_at) VALUES ($1, $2, $3, $4, $5)"#,
         uuid,
