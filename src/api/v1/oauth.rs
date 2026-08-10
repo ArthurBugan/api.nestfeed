@@ -398,9 +398,7 @@ pub async fn update_user_session(
     // First, get or create the user
     let user_id = get_or_create_user(db, email, provider).await?;
 
-    let offset_dt = OffsetDateTime::from_unix_timestamp(
-        expires_at.and_utc().timestamp()
-    ).unwrap();
+    let offset_dt = chrono::Utc::now();
 
     let _ = sqlx::query!(
         r#"
