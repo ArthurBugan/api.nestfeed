@@ -11,6 +11,7 @@ pub mod utils;
 pub mod cache;
 pub mod body_logger;
 pub mod limits;
+pub mod metrics;
 
 use serde::{Deserialize, Serialize};
 use sqlx::prelude::FromRow;
