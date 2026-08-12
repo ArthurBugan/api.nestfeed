@@ -507,7 +507,7 @@ mod tests {
     use crate::db::init_db;
     use crate::api::common::cache::RedisCache;
     use crate::email::EmailClient;
-    use crate::api::v1::oauth::{build_google_oauth_client, build_discord_oauth_client, OAuthClients};
+    use crate::api::v1::oauth::{build_google_oauth_client, build_discord_oauth_client, build_apple_oauth_client, OAuthClients};
     use deadpool_redis::{Config as RedisConfig, Runtime};
     use sea_orm::Database;
 
@@ -539,6 +539,12 @@ mod tests {
         let oauth_clients = OAuthClients {
             google: google_oauth_client,
             discord: discord_oauth_client,
+            apple: build_apple_oauth_client(
+                std::env::var("APPLE_OAUTH_CLIENT_ID").unwrap_or_else(|_| "test_id".to_string()),
+                std::env::var("APPLE_TEAM_ID").unwrap_or_else(|_| "test_team".to_string()),
+                std::env::var("APPLE_KEY_ID").unwrap_or_else(|_| "test_key".to_string()),
+                std::env::var("APPLE_PRIVATE_KEY").unwrap_or_else(|_| "test_key".to_string()),
+            ),
         };
 
         InnerState {

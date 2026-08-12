@@ -54,11 +54,9 @@ bytes = "1.11.1"
 oauth2 = "4.4.2"
 dotenvy = "0.15.7"
 
-axum-otel = "0.31.6"
-axum-otel-metrics = "0.12.0"
 tracing-otel-extra = { version = "0.31.6", features = ["otel", "logger"] }
 opentelemetry = "0.31.0"
-opentelemetry_sdk = { version = "0.31.0", features = ["rt-tokio"] }
+opentelemetry_sdk = { version = "0.31.0", features = ["rt-tokio", "testing"] }
 opentelemetry-otlp = { version = "0.31.1", features = ["metrics", "grpc-tonic", "logs"] }
 opentelemetry-semantic-conventions = { version = "0.31.0", features = ["semconv_experimental"] }
 rust_decimal = "1.41.0"

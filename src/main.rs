@@ -16,6 +16,7 @@ use crate::db::init_db;
 use crate::system::create_system_router;
 use crate::api::common::tracing::{make_custom_span, on_custom_request, on_custom_response, on_custom_failure};
 use crate::api::common::body_logger::log_request_response_body;
+use crate::api::common::metrics::http_metrics;
 
 use anyhow::Result;
 use axum::extract::FromRef;
@@ -196,6 +197,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 )
                 .layer(PropagateRequestIdLayer::x_request_id()),
         )
+        .layer(axum::middleware::from_fn(http_metrics))
         .layer(Extension(shared_state));
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3010")
