@@ -40,10 +40,13 @@ use tracing::Level;
 
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tracing_otel_extra::{
-    get_resource, init_env_filter, init_logger_provider, init_meter_provider, init_tracer_provider, init_tracing_subscriber
+    get_resource, init_env_filter, init_logger_provider, init_meter_provider, init_tracing_subscriber
 };
 
+use opentelemetry::global;
 use opentelemetry::KeyValue;
+use opentelemetry_otlp::SpanExporter;
+use opentelemetry_sdk::trace::{RandomIdGenerator, Sampler, SdkTracerProvider};
 use deadpool_redis::{Config as RedisConfig, Runtime};
 use crate::api::common::cache::RedisCache;
 
@@ -76,6 +79,34 @@ impl FromRef<AppState> for InnerState {
 
 pub type SharedState = Arc<RwLock<HeaderAppState>>;
 
+fn otlp_env_var(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|value| !value.trim().is_empty())
+}
+
+fn traces_endpoint_from_env() -> Option<String> {
+    if let Some(endpoint) = otlp_env_var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+        .or_else(|| otlp_env_var("OTEL_EXPORTER_OTLP_ENDPOINT"))
+    {
+        return Some(endpoint);
+    }
+    otlp_env_var("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
+        .or_else(|| otlp_env_var("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"))
+        .map(|endpoint| match endpoint.rsplit_once("/v1/") {
+            Some((base, _)) => format!("{base}/v1/traces"),
+            None => endpoint,
+        })
+}
+
+fn traces_protocol_from_env() -> String {
+    otlp_env_var("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL")
+        .or_else(|| otlp_env_var("OTEL_EXPORTER_OTLP_PROTOCOL"))
+        .or_else(|| otlp_env_var("OTEL_EXPORTER_OTLP_METRICS_PROTOCOL"))
+        .or_else(|| otlp_env_var("OTEL_EXPORTER_OTLP_LOGS_PROTOCOL"))
+        .unwrap_or_else(|| "grpc".to_string())
+        .trim()
+        .to_ascii_lowercase()
+}
+
 
 
 #[tokio::main]
@@ -84,7 +115,48 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let service_name = "api-groupify";
     let resource = get_resource(service_name, &[KeyValue::new("environment", "production")]);
 
-    let tracer_provider = init_tracer_provider(&resource, 1.0)?;
+    global::set_text_map_propagator(opentelemetry_sdk::propagation::TraceContextPropagator::new());
+
+    use opentelemetry_otlp::WithExportConfig as _;
+
+    let span_exporter_endpoint = traces_endpoint_from_env();
+    let span_exporter_protocol = traces_protocol_from_env();
+    let span_exporter = if span_exporter_protocol.starts_with("http") {
+        if span_exporter_protocol == "http/json" {
+            tracing::warn!(
+                "protocole http/json is not supported by opentelemetry-otlp build features, falling back to http/protobuf"
+            );
+        }
+        let builder = SpanExporter::builder()
+            .with_http()
+            .with_protocol(opentelemetry_otlp::Protocol::HttpBinary);
+        let builder = match span_exporter_endpoint {
+            Some(ref endpoint) => builder.with_endpoint(endpoint.clone()),
+            None => builder,
+        };
+        builder.build()?
+    } else {
+        let builder = SpanExporter::builder().with_tonic();
+        let builder = match span_exporter_endpoint {
+            Some(ref endpoint) => builder.with_endpoint(endpoint.clone()),
+            None => builder,
+        };
+        builder.build()?
+    };
+    tracing::info!(
+        endpoint = span_exporter_endpoint.as_deref().unwrap_or("default (localhost:4317)"),
+        protocol = span_exporter_protocol.as_str(),
+        "OTLP span exporter initialized"
+    );
+
+    let tracer_provider = SdkTracerProvider::builder()
+        .with_sampler(Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(1.0))))
+        .with_id_generator(RandomIdGenerator::default())
+        .with_resource(resource.clone())
+        .with_batch_exporter(span_exporter)
+        .build();
+    global::set_tracer_provider(tracer_provider.clone());
+
     let meter_provider = init_meter_provider(&resource, 30)?;
     let env_filter = init_env_filter(&Level::DEBUG);
     let logger_provider = init_logger_provider(&resource)?;
@@ -221,4 +293,40 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .expect("Could not successfully connect");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use opentelemetry::global;
+    use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry_sdk::trace::{InMemorySpanExporterBuilder, SdkTracerProvider};
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::Registry;
+
+    #[tokio::test]
+    async fn exports_trace_spans() {
+        let exporter = InMemorySpanExporterBuilder::new().build();
+        let provider = SdkTracerProvider::builder()
+            .with_batch_exporter(exporter.clone())
+            .build();
+        global::set_tracer_provider(provider.clone());
+
+        let subscriber = Registry::default().with(
+            tracing_otel_extra::otel::tracing_opentelemetry::OpenTelemetryLayer::new(
+                provider.tracer("api-groupify"),
+            ),
+        );
+
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("http_request", method = "GET", uri = "/api/v1/test");
+            let _guard = span.enter();
+            tracing::info!(status = 200, "request complete");
+        });
+
+        provider.force_flush().unwrap();
+
+        let spans = exporter.get_finished_spans().unwrap();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].name, "http_request");
+    }
 }
