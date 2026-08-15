@@ -84,17 +84,34 @@ fn otlp_env_var(name: &str) -> Option<String> {
 }
 
 fn traces_endpoint_from_env() -> Option<String> {
+    let http = traces_protocol_from_env().starts_with("http");
     if let Some(endpoint) = otlp_env_var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
         .or_else(|| otlp_env_var("OTEL_EXPORTER_OTLP_ENDPOINT"))
     {
-        return Some(endpoint);
+        // Per the OTLP spec these vars may be a base URL without the signal
+        // path; OTLP/HTTP clients are expected to append /v1/traces. gRPC
+        // clients use the bare host:port and ignore any path.
+        return Some(with_traces_path(&endpoint, http));
     }
+    // Derive from other signals: remap their /v1/<signal> path to /v1/traces
     otlp_env_var("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
         .or_else(|| otlp_env_var("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"))
         .map(|endpoint| match endpoint.rsplit_once("/v1/") {
-            Some((base, _)) => format!("{base}/v1/traces"),
-            None => endpoint,
+            Some((base, _)) => format!("{}/v1/traces", base.trim_end_matches('/')),
+            None => with_traces_path(&endpoint, http),
         })
+}
+
+fn with_traces_path(endpoint: &str, http: bool) -> String {
+    if !http {
+        return endpoint.to_string();
+    }
+    if endpoint.rsplit_once("/v1/").is_some() {
+        // Explicit signal path already present; honor it as-is.
+        endpoint.to_string()
+    } else {
+        format!("{}/v1/traces", endpoint.trim_end_matches('/'))
+    }
 }
 
 fn traces_protocol_from_env() -> String {
@@ -124,7 +141,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let span_exporter = if span_exporter_protocol.starts_with("http") {
         if span_exporter_protocol == "http/json" {
             tracing::warn!(
-                "protocole http/json is not supported by opentelemetry-otlp build features, falling back to http/protobuf"
+                "protocol http/json is not supported by opentelemetry-otlp build features, falling back to http/protobuf"
             );
         }
         let builder = SpanExporter::builder()
@@ -136,10 +153,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         };
         builder.build()?
     } else {
-        let builder = SpanExporter::builder().with_tonic();
+        // The endpoint carries its scheme (https://), so tonic's gRPC channel
+        // negotiates TLS from it automatically.
         let builder = match span_exporter_endpoint {
-            Some(ref endpoint) => builder.with_endpoint(endpoint.clone()),
-            None => builder,
+            Some(ref endpoint) => SpanExporter::builder()
+                .with_tonic()
+                .with_endpoint(endpoint.clone()),
+            None => SpanExporter::builder().with_tonic(),
         };
         builder.build()?
     };
@@ -165,10 +185,33 @@ async fn main() -> Result<(), Box<dyn Error>> {
         service_name,
         env_filter,
         vec![Box::new(tracing_subscriber::fmt::layer())],
-        tracer_provider,
+        tracer_provider.clone(),
         meter_provider,
         Some(logger_provider),
     )?;
+
+    // One-shot self check: end a synthetic span and force a flush so a
+    // misconfigured/broken traces endpoint shows up in the startup logs
+    // immediately instead of silently dropping every span.
+    {
+        use opentelemetry::trace::{Span as _, Tracer, TracerProvider as _};
+        let tracer = tracer_provider.tracer("api-groupify-selfcheck");
+        let mut span = tracer
+            .span_builder("otel.exporter.selfcheck")
+            .with_attributes(vec![KeyValue::new("check", "startup")])
+            .start(&tracer);
+        span.end();
+        match tracer_provider.force_flush() {
+            Ok(()) => tracing::info!(
+                endpoint = span_exporter_endpoint.as_deref().unwrap_or("default"),
+                "trace exporter self-check: force_flush ok, spans are being exported"
+            ),
+            Err(e) => tracing::error!(
+                endpoint = span_exporter_endpoint.as_deref().unwrap_or("default"),
+                "trace exporter self-check FAILED, traces will not appear in the dashboard. error = {e}"
+            ),
+        }
+    }
 
     tracing::info!("Starting Groupify API server");
 
@@ -297,11 +340,97 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
     use opentelemetry::global;
     use opentelemetry::trace::TracerProvider as _;
     use opentelemetry_sdk::trace::{InMemorySpanExporterBuilder, SdkTracerProvider};
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::Registry;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new();
+
+    fn clear_otel_env() {
+        for var in [
+            "OTEL_EXPORTER_OTLP_ENDPOINT",
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+            "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+            "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+            "OTEL_EXPORTER_OTLP_PROTOCOL",
+            "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
+            "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL",
+            "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL",
+        ] {
+            unsafe {
+                std::env::remove_var(var);
+            }
+        }
+    }
+
+    fn set_env(key: &str, value: &str) {
+        unsafe {
+            std::env::set_var(key, value);
+        }
+    }
+
+    #[test]
+    fn traces_endpoint_appends_v1_traces_for_http_without_signal_path() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_otel_env();
+        set_env("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "https://collector.example.com:4318");
+        set_env("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf");
+        assert_eq!(
+            traces_endpoint_from_env().as_deref(),
+            Some("https://collector.example.com:4318/v1/traces")
+        );
+        clear_otel_env();
+    }
+
+    #[test]
+    fn traces_endpoint_keeps_explicit_signal_path() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_otel_env();
+        set_env(
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+            "https://collector.example.com/api/v1/traces",
+        );
+        assert_eq!(
+            traces_endpoint_from_env().as_deref(),
+            Some("https://collector.example.com/api/v1/traces")
+        );
+        clear_otel_env();
+    }
+
+    #[test]
+    fn traces_endpoint_is_bare_for_grpc() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_otel_env();
+        set_env("OTEL_EXPORTER_OTLP_ENDPOINT", "https://collector.example.com:4317");
+        assert_eq!(
+            traces_endpoint_from_env().as_deref(),
+            Some("https://collector.example.com:4317")
+        );
+        clear_otel_env();
+    }
+
+    #[test]
+    fn traces_endpoint_remapped_from_metrics_endpoint() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_otel_env();
+        set_env("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "https://collector.example.com:4318/v1/metrics");
+        set_env("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf");
+        assert_eq!(
+            traces_endpoint_from_env().as_deref(),
+            Some("https://collector.example.com:4318/v1/traces")
+        );
+        clear_otel_env();
+    }
+
+    #[test]
+    fn traces_endpoint_none_when_nothing_configured() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_otel_env();
+        assert_eq!(traces_endpoint_from_env(), None);
+    }
 
     #[tokio::test]
     async fn exports_trace_spans() {
