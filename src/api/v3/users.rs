@@ -38,6 +38,10 @@ pub struct User {
     pub channel_count: i32,
     pub can_add_channel: bool,
     pub can_add_group: bool,
+    /// True when the user has a Google (YouTube) session linked, so
+    /// playlist imports can be resolved with their own authorization
+    /// (spec 007/008 — replaces client API keys).
+    pub youtube_synced: bool,
 }
 
 #[tracing::instrument(name = "Get current user data", skip(cookies, inner))]
@@ -88,6 +92,17 @@ pub async fn me(
             .await
             .unwrap_or(0);
 
+    // YouTube sync: a Google session row (created by Google sign-in) is what
+    // lets the backend resolve playlists with the user's own authorization.
+    let youtube_synced = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM sessions WHERE user_id = $1 AND provider = 'google'",
+    )
+    .bind(&user_id)
+    .fetch_one(&inner.db)
+    .await
+    .unwrap_or(0)
+        > 0;
+
     let subscription_plans_users = subscription_plans_users::Entity::find()
         .filter(subscription_plans_users::Column::UserId.eq(user_id))
         .find_also_related(subscription_plans::Entity)
@@ -129,6 +144,7 @@ pub async fn me(
 
             can_add_channel: channels_count < plan.max_channels,
             can_add_group: group_count < plan.max_groups,
+            youtube_synced,
         })));
     }
 

@@ -11,6 +11,7 @@ pub mod users;
 pub mod dashboard;
 pub mod animes;
 pub mod share;
+pub mod youtube_import;
 
 use axum::{middleware, Router};
 use axum::routing::{delete, get, patch, post, put};
@@ -42,6 +43,8 @@ pub fn create_v2_router(state: InnerState) -> Router<InnerState> {
         .route("/api/v2/dashboard/total", get(dashboard::get_dashboard_total))
 
         .route("/api/v2/animes", get(animes::all_animes))
+
+        .route("/api/v2/youtube-import/resolve", post(youtube_import::resolve))
 
         .route("/api/v2/share-link", post(share::generate_share_link))
         .route("/api/v2/share-link/{link_code}", get(share::get_share_link))
