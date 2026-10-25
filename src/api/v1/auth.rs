@@ -57,7 +57,11 @@ pub async fn google_callback(
     tracing::info!("Processing Google OAuth callback");
 
     let InnerState {
-        db, oauth_clients, redis_cache, ..
+        db,
+        oauth_clients,
+        redis_cache,
+        http_client,
+        ..
     } = inner;
     let domain = std::env::var("GROUPIFY_HOST").expect("GROUPIFY_HOST must be set.");
 
@@ -121,7 +125,7 @@ pub async fn google_callback(
 
     tracing::debug!("Fetching user profile from Google");
     let profile =
-        fetch_user_profile(&token.access_token().secret(), &OAuthProvider::Google).await?;
+        fetch_user_profile(&token.access_token().secret(), &OAuthProvider::Google, &http_client).await?;
 
     tracing::info!("Retrieved user profile for email: {}", profile.email);
 

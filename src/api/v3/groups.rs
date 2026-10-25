@@ -589,7 +589,7 @@ pub async fn sync_group_videos(
     State(inner): State<InnerState>,
     Path(group_id): Path<String>,
 ) -> Result<Json<ApiResponse<String>>, AppError> {
-    let InnerState { sea_db, db, .. } = inner;
+    let InnerState { sea_db, db, http_client, .. } = inner;
 
     // Authenticate user
     let auth_token = cookies
@@ -715,7 +715,7 @@ pub async fn sync_group_videos(
     tracing::info!("Extracted {} YouTube channel IDs: {:?}", channel_ids.len(), channel_ids);
 
     // Trigger video sync
-    let sync_service = VideoSyncService::new(sea_db);
+    let sync_service = VideoSyncService::new(sea_db, http_client);
     
     match sync_service.sync_group_videos(&user_id, &group_id, &session_id, channel_ids).await {
         Ok(count) => {

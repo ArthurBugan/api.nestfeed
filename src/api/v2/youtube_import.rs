@@ -21,6 +21,7 @@
 //!
 //! The app groups + creates entities itself (limits/dedupes stay app-side).
 
+use futures::stream::{self, StreamExt};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -33,8 +34,6 @@ use crate::InnerState;
 use axum::{extract::State, Json};
 use chrono::{DateTime, Utc};
 use sqlx::Row;
-
-const UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -301,6 +300,39 @@ fn draft_from_html(html: &str, channel_id: String) -> Option<DraftChannel> {
     })
 }
 
+fn extract_channel_identifier(url: &str) -> Option<String> {
+    let idx = url.find("/channel/")?;
+    let rest = &url[idx + 9..];
+    let end = rest.find(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_').unwrap_or(rest.len());
+    Some(rest[..end].to_string()).filter(|s| s.starts_with("UC") && s.len() >= 22)
+}
+
+/// Fetch a channel page (either `/channel/UC…` or `@handle` form) **once**
+/// and build the draft from its HTML. The UC channel id comes from the
+/// caller when known, otherwise it is read off the page itself — so a link
+/// to `@handle` no longer costs two round-trips (handle page → channel page).
+async fn resolve_channel_page(
+    client: &Client,
+    channel_url: &str,
+    known_id: Option<String>,
+) -> Result<DraftChannel, String> {
+    let html = fetch_channel_html(client, channel_url).await?;
+    let channel_id = known_id
+        .or_else(|| find_page_channel_id(&html))
+        .ok_or_else(|| "channel not found".to_string())?;
+    draft_from_html(&html, channel_id).ok_or_else(|| "channel page incomplete".to_string())
+}
+
+/// Take a UC id all the way to a named DraftChannel via its page HTML.
+async fn finish_channel(client: &Client, channel_id: String) -> Result<DraftChannel, String> {
+    resolve_channel_page(
+        client,
+        &format!("https://www.youtube.com/channel/{channel_id}"),
+        Some(channel_id),
+    )
+    .await
+}
+
 async fn resolve_video(client: &Client, video_id: &str) -> Result<DraftChannel, String> {
     // oEmbed gives the trusted channel identity even on watch pages.
     let url = format!("https://www.youtube.com/oembed?url=https%3A%2F%2Fyoutu.be%2F{video_id}&format=json");
@@ -310,47 +342,30 @@ async fn resolve_video(client: &Client, video_id: &str) -> Result<DraftChannel, 
     }
     let body: Value = res.json().await.map_err(|e| format!("oEmbed json: {e}"))?;
     let author_name = body["author_name"].as_str().map(|s| s.to_string());
-    let author_url = body["author_url"].as_str().map(|s| s.to_string()).unwrap_or_default();
+    let author_url = body["author_url"].as_str().unwrap_or_default().to_string();
     let thumb = body["thumbnail_url"].as_str().map(|s| s.to_string());
 
-    if let Some(cid) = extract_channel_identifier(&author_url) {
-        return finish_channel(client, cid).await;
+    // Resolve the author's channel with a single page fetch: prefer the
+    // canonical /channel/UC… URL from oEmbed, else follow the @handle form
+    // (whose page itself carries the channel id and all draft fields).
+    let channel_url = match extract_channel_identifier(&author_url) {
+        Some(cid) => format!("https://www.youtube.com/channel/{cid}"),
+        None => author_url.clone(),
+    };
+    if !channel_url.contains("youtube.com/channel/") && !channel_url.contains("/@") {
+        return Err("video channel could not be resolved".into());
     }
-    if let Some(rest) = author_url.rsplit_once('/').map(|(_, r)| r) {
-        if rest.starts_with('@') {
-            let handle = &rest[1..];
-            let cid = fetch_channel_html(client, &format!("https://www.youtube.com/@{handle}"))
-                .await
-                .ok()
-                .and_then(|h| find_page_channel_id(&h));
-            if let Some(cid) = cid {
-                let html = fetch_channel_html(client, &format!("https://www.youtube.com/channel/{cid}")).await?;
-                let mut draft = draft_from_html(&html, cid).ok_or("channel page incomplete")?;
-                if draft.thumbnail.is_none() {
-                    draft.thumbnail = thumb;
-                }
-                if author_name.is_some() && draft.name.is_empty() {
-                    draft.name = author_name.unwrap();
-                }
-                return Ok(draft);
-            }
+
+    let mut draft = resolve_channel_page(client, &channel_url, None).await?;
+    if draft.thumbnail.is_none() {
+        draft.thumbnail = thumb;
+    }
+    if draft.name.is_empty() {
+        if let Some(name) = author_name {
+            draft.name = name;
         }
     }
-    Err("video channel could not be resolved".into())
-}
-
-fn extract_channel_identifier(url: &str) -> Option<String> {
-    let idx = url.find("/channel/")?;
-    let rest = &url[idx + 9..];
-    let end = rest.find(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_').unwrap_or(rest.len());
-    Some(rest[..end].to_string()).filter(|s| s.starts_with("UC") && s.len() >= 22)
-}
-
-/// Take a UC id all the way to a named DraftChannel via its page HTML.
-async fn finish_channel(client: &Client, channel_id: String) -> Result<DraftChannel, String> {
-    let url = format!("https://www.youtube.com/channel/{channel_id}");
-    let html = fetch_channel_html(client, &url).await?;
-    draft_from_html(&html, channel_id).ok_or_else(|| "channel page incomplete".into())
+    Ok(draft)
 }
 
 /* ------------------------------------------------------------------ */
@@ -485,6 +500,7 @@ async fn resolve_playlist(
 ) -> Result<(Vec<DraftChannel>, Option<String>), String> {
     // 1) Paginate playlistItems, collecting unique owner channel ids.
     let mut channel_ids: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut page_token: Option<String> = None;
     let mut pages = 0usize;
     loop {
@@ -513,7 +529,7 @@ async fn resolve_playlist(
                 .and_then(|s| s.video_owner_channel_id.or(s.video_owner_channel_title))
                 .or_else(|| item.content_details.and_then(|c| c.video_owner_channel_id));
             if let Some(id) = owner {
-                if id.starts_with("UC") && !channel_ids.contains(&id) {
+                if id.starts_with("UC") && seen.insert(id.clone()) {
                     channel_ids.push(id);
                 }
             }
@@ -588,6 +604,66 @@ async fn resolve_playlist(
 /* Handler                                                             */
 /* ------------------------------------------------------------------ */
 
+/// Outcome of resolving a single pasted line.
+enum Resolved {
+    Channel(DraftChannel),
+    Playlist {
+        playlist: PlaylistRef,
+        channels: Vec<DraftChannel>,
+    },
+    Failed(ResolveError),
+}
+
+/// Resolve one pasted line — pure per-line logic, safe to run concurrently.
+async fn resolve_link(
+    client: &Client,
+    google_token: Option<&String>,
+    raw_line: &str,
+) -> Resolved {
+    let fail = |error: String| Resolved::Failed(ResolveError { raw: raw_line.to_string(), error });
+    match parse_link(raw_line) {
+        ParsedLink::ChannelId(id) => match finish_channel(client, id).await {
+            Ok(d) => Resolved::Channel(d),
+            Err(e) => fail(e),
+        },
+        // One fetch: the handle page itself carries the channel id and all
+        // draft fields (og:title, subscriber count, …).
+        ParsedLink::Handle(handle) => {
+            match resolve_channel_page(client, &format!("https://www.youtube.com/@{handle}"), None).await
+            {
+                Ok(d) => Resolved::Channel(d),
+                Err(e) => fail(e),
+            }
+        }
+        ParsedLink::VideoId(video_id) => match resolve_video(client, &video_id).await {
+            Ok(d) => Resolved::Channel(d),
+            Err(e) => fail(e),
+        },
+        ParsedLink::PlaylistId(playlist_id) => match google_token {
+            Some(token) => match resolve_playlist(client, token, &playlist_id).await {
+                Ok((drafts, title)) => Resolved::Playlist {
+                    playlist: PlaylistRef {
+                        id: playlist_id.clone(),
+                        name: title.unwrap_or_else(|| playlist_id.clone()),
+                    },
+                    channels: drafts,
+                },
+                Err(e) => fail(e),
+            },
+            None => fail(
+                "YouTube account not synced or session expired — sign in with Google again to import playlists"
+                    .into(),
+            ),
+        },
+        ParsedLink::Invalid(e) => fail(e),
+    }
+}
+
+/// Bounded parallelism across links: each line costs 1–3 HTTP round-trips,
+/// so serially resolving a 50-line paste could take a minute-plus; at this
+/// width ~8 links are in flight, typically finishing in a couple of seconds.
+const RESOLVE_CONCURRENCY: usize = 8;
+
 #[tracing::instrument(name = "Resolve YouTube links", skip(cookies, inner))]
 pub async fn resolve(
     cookies: Cookies,
@@ -612,68 +688,49 @@ pub async fn resolve(
         return Err(AppError::Validation("Resolve at most 50 links per request".into()));
     }
 
-    let client = Client::builder()
-        .user_agent(UA)
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| AppError::Unexpected(anyhow::anyhow!(e).context("reqwest build")))?;
+    // Shared client from app state — pooled connections, browser UA.
+    let client = inner.http_client.clone();
+
+    // Look the Google token up at most once, up front and only when a
+    // playlist line is present — safer than lazily renewing it from
+    // concurrent playlist resolutions racing each other.
+    let needs_google = req
+        .links
+        .iter()
+        .any(|l| matches!(parse_link(l), ParsedLink::PlaylistId(_)));
+    let google_token = if needs_google {
+        user_google_token(&inner, &email).await
+    } else {
+        None
+    };
+
+    // Resolve all lines concurrently (bounded), tracking the input index so
+    // results can be re-ordered deterministically afterwards.
+    let results: Vec<(usize, Resolved)> = stream::iter(req.links.clone().into_iter().enumerate())
+        .map(|(idx, raw)| {
+            let client = client.clone();
+            let google_token = google_token.clone();
+            async move { (idx, resolve_link(&client, google_token.as_ref(), &raw).await) }
+        })
+        .buffer_unordered(RESOLVE_CONCURRENCY)
+        .collect()
+        .await;
+
+    let mut ordered: Vec<(usize, Resolved)> = results;
+    ordered.sort_by_key(|(idx, _)| *idx);
 
     let mut channels: Vec<DraftChannel> = Vec::new();
     let mut errors: Vec<ResolveError> = Vec::new();
     let mut playlists: Vec<PlaylistRef> = Vec::new();
-    // Looked up lazily on the first playlist line (most pastes have none).
-    let mut google_token: Option<String> = None;
 
-    for raw_line in &req.links {
-        match parse_link(raw_line) {
-            ParsedLink::ChannelId(id) => match finish_channel(&client, id).await {
-                Ok(d) => channels.push(d),
-                Err(e) => errors.push(ResolveError { raw: raw_line.clone(), error: e }),
-            },
-            ParsedLink::Handle(handle) => {
-                let html = fetch_channel_html(&client, &format!("https://www.youtube.com/@{handle}")).await;
-                let id = html.as_ref().ok().and_then(|h| find_page_channel_id(h));
-                match id {
-                    Some(id) => match finish_channel(&client, id).await {
-                        Ok(d) => channels.push(d),
-                        Err(e) => errors.push(ResolveError { raw: raw_line.clone(), error: e }),
-                    },
-                    None => errors.push(ResolveError {
-                        raw: raw_line.clone(),
-                        error: html.err().unwrap_or_else(|| "channel not found".into()),
-                    }),
-                }
+    for (_, resolved) in ordered {
+        match resolved {
+            Resolved::Channel(d) => channels.push(d),
+            Resolved::Playlist { channels: mut playlist_channels, playlist } => {
+                playlists.push(playlist);
+                channels.append(&mut playlist_channels);
             }
-            ParsedLink::VideoId(video_id) => {
-                // Interruptible failures step down to oEmbed-less paths later.
-                match resolve_video(&client, &video_id).await {
-                    Ok(d) => channels.push(d),
-                    Err(e) => errors.push(ResolveError { raw: raw_line.clone(), error: e }),
-                }
-            }
-            ParsedLink::PlaylistId(playlist_id) => {
-                if google_token.is_none() {
-                    google_token = user_google_token(&inner, &email).await;
-                }
-                match google_token.as_ref() {
-                    Some(token) => match resolve_playlist(&client, token, &playlist_id).await {
-                        Ok((drafts, title)) => {
-                            playlists.push(PlaylistRef {
-                                id: playlist_id.clone(),
-                                name: title.unwrap_or_else(|| playlist_id.clone()),
-                            });
-                            channels.extend(drafts);
-                        }
-                        Err(e) => errors.push(ResolveError { raw: raw_line.clone(), error: e }),
-                    },
-                    None => errors.push(ResolveError {
-                        raw: raw_line.clone(),
-                        error: "YouTube account not synced or session expired — sign in with Google again to import playlists"
-                            .into(),
-                    }),
-                }
-            }
-            ParsedLink::Invalid(e) => errors.push(ResolveError { raw: raw_line.clone(), error: e }),
+            Resolved::Failed(e) => errors.push(e),
         }
     }
 

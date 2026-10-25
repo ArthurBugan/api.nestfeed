@@ -1,6 +1,5 @@
 use axum::{extract::State, Json};
 use chrono::{DateTime, Local, Utc};
-use reqwest::Client;
 use serde_json::{json, Value};
 use tower_cookies::Cookies;
 
@@ -88,6 +87,7 @@ pub async fn sync_channels_from_youtube(
     let InnerState {
         db,
         oauth_clients,
+        http_client,
         ..
     } = &inner;
 
@@ -142,7 +142,7 @@ pub async fn sync_channels_from_youtube(
     let session_id: String = bearer.get("session_id");
     tracing::debug!("Using session ID for YouTube API requests");
 
-    let req = Client::new();
+    let req = http_client;
     let mut all_items = Vec::new();
     let mut next_page_token = None;
     let mut page_count = 0;

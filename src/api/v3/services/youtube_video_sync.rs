@@ -5,6 +5,7 @@
 //! instead of search.list (100 units).
 
 use chrono::{DateTime, Utc};
+use futures::stream::{self, StreamExt};
 use reqwest::Client;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set,
@@ -111,10 +112,12 @@ pub struct VideoSyncService {
 }
 
 impl VideoSyncService {
-    pub fn new(db: DatabaseConnection) -> Self {
+    /// Shared http client comes from app state so connection pools are
+    /// reused across requests instead of being rebuilt per call.
+    pub fn new(db: DatabaseConnection, http_client: Client) -> Self {
         Self {
             db,
-            http_client: Client::new(),
+            http_client,
         }
     }
 
@@ -129,10 +132,22 @@ impl VideoSyncService {
     ) -> Result<usize, AppError> {
         let mut total_synced = 0;
 
-        for channel_id in channel_ids {
-            info!("Syncing videos for channel: {}", channel_id);
-            
-            match self.sync_channel_videos(user_id, group_id, &channel_id, google_token).await {
+        // Channels are independent — sync them concurrently (bounded so we
+        // stay well inside YouTube/Google API rate limits and the DB pool).
+        // Results are aggregated afterwards so a failure in one channel
+        // doesn't stop (or reorder) the others.
+        const CONCURRENCY: usize = 4;
+        let results: Vec<(String, Result<usize, AppError>)> = stream::iter(channel_ids)
+            .map(|channel_id| async move {
+                info!("Syncing videos for channel: {}", channel_id);
+                (channel_id.clone(), self.sync_channel_videos(user_id, group_id, &channel_id, google_token).await)
+            })
+            .buffer_unordered(CONCURRENCY)
+            .collect()
+            .await;
+
+        for (channel_id, result) in results {
+            match result {
                 Ok(count) => {
                     total_synced += count;
                     info!("Synced {} videos for channel {}", count, channel_id);

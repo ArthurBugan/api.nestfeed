@@ -1,10 +1,9 @@
-use axum::Json;
-use reqwest::Client;
+use axum::{extract::State, Json};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
-use crate::{api::common::ApiResponse, errors::AppError};
+use crate::{InnerState, api::common::ApiResponse, errors::AppError};
 use tower_cookies::Cookies;
 use crate::api::v1::user::get_user_id_from_token;
 
@@ -28,9 +27,10 @@ pub struct ChannelMetadata {
 }
 
 /// Fetch metadata from any URL
-#[tracing::instrument(name = "Fetch URL metadata", skip(cookies))]
+#[tracing::instrument(name = "Fetch URL metadata", skip(cookies, state))]
 pub async fn fetch_url_metadata(
     cookies: Cookies,
+    State(state): State<InnerState>,
     Json(payload): Json<FetchUrlRequest>,
 ) -> Result<Json<ApiResponse<ChannelMetadata>>, AppError> {
     let auth_token = cookies
@@ -49,10 +49,7 @@ pub async fn fetch_url_metadata(
         url = format!("https://{}", url);
     }
 
-    let client = Client::builder()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-        .build()
-        .map_err(|e| AppError::BadRequest(format!("Failed to create HTTP client: {}", e)))?;
+    let client = &state.http_client;
 
     let response = client
         .get(&url)
