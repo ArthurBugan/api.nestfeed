@@ -36,7 +36,7 @@ pub async fn get_invoice_history(
     cookies: Cookies,
     State(inner): State<InnerState>,
 ) -> Result<Json<ApiResponse<InvoicesResponse>>, AppError> {
-    let InnerState { sea_db, .. } = inner;
+    let InnerState { sea_db, http_client, .. } = inner;
 
     let auth_token = cookies
         .get("auth-token")
@@ -72,8 +72,7 @@ pub async fn get_invoice_history(
         .and_then(|s| s.external_customer_id.clone());
 
     let items = if let Some(ref cus_id) = customer_id {
-        let client = reqwest::Client::new();
-        let response = client
+        let response = (&http_client)
             .get(format!("{}/payments", base_url))
             .header("Authorization", format!("Bearer {}", dodo_api_key))
             .header("Content-Type", "application/json")

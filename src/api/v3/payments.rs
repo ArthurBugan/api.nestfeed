@@ -116,9 +116,8 @@ pub async fn create_checkout_session(
         }
     };
 
-    // Create Dodo client
-    let client = reqwest::Client::new();
-    
+    // Create Dodo client (shared, pooled http client from app state)
+    let client = inner.http_client;
     // Prepare the request to Dodo API
     let mut request_body = serde_json::json!({
         "product_cart": [{
@@ -528,8 +527,7 @@ pub async fn cancel_subscription(
     info!("Calling Dodo API to cancel subscription: {}", external_subscription_id);
     
     // Call Dodo API to cancel subscription
-    let client = reqwest::Client::new();
-    
+    let client = inner.http_client;
     let dodo_api_key = std::env::var("DODO_API_KEY")
         .map_err(|_| AppError::BadRequest("DODO_API_KEY not set".to_string()))?;
     

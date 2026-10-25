@@ -85,11 +85,12 @@ pub async fn apple_callback(
         db,
         oauth_clients,
         redis_cache,
+        http_client,
         ..
     } = inner;
 
     tracing::debug!("Exchanging authorization code for access token");
-    let token = exchange_apple_code(&oauth_clients.apple, query.code.clone())
+    let token = exchange_apple_code(&oauth_clients.apple, &http_client, query.code.clone())
         .await
         .map_err(|e| {
             tracing::error!("Failed to exchange Apple authorization code: {:?}", e);

@@ -72,6 +72,7 @@ pub struct AppleTokenResponse {
 #[tracing::instrument(name = "Exchange Apple authorization code", skip(_client, code))]
 pub async fn exchange_apple_code(
     _client: &BasicClient,
+    http_client: &Client,
     code: String,
 ) -> Result<AppleTokenResponse, AppError> {
     let token_url = "https://appleid.apple.com/auth/token";
@@ -101,7 +102,6 @@ pub async fn exchange_apple_code(
         "client_secret": client_secret,
     });
 
-    let http_client = Client::new();
     let response = http_client
         .post(token_url)
         .header("Content-Type", "application/json")
@@ -292,14 +292,13 @@ pub fn generate_auth_url(
 pub async fn fetch_user_profile(
     access_token: &str,
     provider: &OAuthProvider,
+    http_client: &Client,
 ) -> Result<UserProfile, AppError> {
     if let OAuthProvider::Apple = provider {
         // Apple profile is typically in the id_token, not a separate endpoint.
         // For now, we'll return a placeholder or handle it in the callback.
         return Err(AppError::ExternalService(anyhow::anyhow!("Apple profile must be extracted from id_token")));
     }
-    let client = Client::new();
-
     let (url, auth_header) = match provider {
         OAuthProvider::Google => (
             "https://www.googleapis.com/oauth2/v2/userinfo",
@@ -317,7 +316,7 @@ pub async fn fetch_user_profile(
 
     tracing::debug!("Fetching user profile from: {}", url);
 
-    let response = client
+    let response = http_client
         .get(url)
         .header("Authorization", auth_header)
         .send()

@@ -63,6 +63,10 @@ struct InnerState {
     pub email_client: EmailClient,
     pub oauth_clients: OAuthClients,
     pub redis_cache: RedisCache,
+    /// One shared reqwest client for all outbound HTTP. Reusing it keeps
+    /// connection pools alive across requests (no repeat DNS/TLS handshakes)
+    /// — building a client per handler call silently disables keep-alive.
+    pub http_client: reqwest::Client,
 }
 
 #[derive(Default)]
@@ -249,10 +253,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
         std::env::var("APPLE_PRIVATE_KEY")?,
     );
 
+    let http_client = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(15))
+        .pool_max_idle_per_host(20)
+        .build()?;
+
     let app_state = InnerState {
         db,
         sea_db,
         email_client,
+        http_client,
         oauth_clients: OAuthClients {
             google: google_oauth_client,
             discord: discord_oauth_client,

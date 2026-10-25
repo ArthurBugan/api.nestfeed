@@ -840,6 +840,7 @@ pub async fn patch_channels_batch(
         email_client,
         oauth_clients,
         redis_cache,
+        http_client,
     } = inner;
 
     let auth_token = cookies
@@ -876,6 +877,7 @@ pub async fn patch_channels_batch(
                 email_client: email_client.clone(),
                 oauth_clients: oauth_clients.clone(),
                 redis_cache: redis_cache.clone(),
+                http_client: http_client.clone(),
             }),
             Path(channel_id_for_patch),
             Json(channel_request),

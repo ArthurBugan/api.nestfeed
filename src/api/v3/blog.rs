@@ -1,5 +1,4 @@
-use axum::{extract::Query, Json};
-use reqwest::Client;
+use axum::{extract::{Query, State}, Json};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -50,10 +49,11 @@ pub struct BlogResponse {
 #[tracing::instrument(name = "Get v3 get_blog_posts")]
 pub async fn get_blog_posts(
     Query(params): Query<BlogQueryParams>,
+    State(state): State<crate::InnerState>,
 ) -> Result<Json<BlogResponse>, axum::http::StatusCode> {
     let directus_url = std::env::var("DIRECTUS_URL")
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    let client = Client::new();
+    let client = state.http_client;
     let mut query_params = HashMap::new();
 
     // Build filter query for Directus
@@ -194,10 +194,11 @@ pub async fn get_blog_posts(
 /// Fetch a single blog post by slug from Directus CMS
 pub async fn get_blog_post_by_slug(
     axum::extract::Path(slug): axum::extract::Path<String>,
+    State(state): State<crate::InnerState>,
 ) -> Result<Json<BlogPost>, axum::http::StatusCode> {
     let directus_url = std::env::var("DIRECTUS_URL")
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    let client = Client::new();
+    let client = state.http_client;
 
     let response = client
         .get(format!(

@@ -81,7 +81,7 @@ pub async fn discord_callback(
 
     tracing::debug!("Successfully obtained Discord access token");
 
-    let user_profile = fetch_user_profile(access_token, &OAuthProvider::Discord).await?;
+    let user_profile = fetch_user_profile(access_token, &OAuthProvider::Discord, &inner.http_client).await?;
     tracing::info!("Fetched Discord user profile for: {}", user_profile.email);
 
     let expires_at = crate::api::v1::auth::calculate_token_expiry(token.expires_in()).await;
